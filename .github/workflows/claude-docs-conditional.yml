@@ -1,0 +1,72 @@
+name: Claude Docs Auto-Update
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    # docsのみの変更は除外（オプション）
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+
+concurrency:
+  group: claude-docs-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  claude-docs-update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # ← write に変更（コミット用）
+      pull-requests: write   # ← write に変更（PR更新用）
+      issues: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # ← 変更差分を取得するため0に
+          ref: ${{ github.head_ref }}  # PRのブランチをチェックアウト
+
+      - name: Run Claude Docs Update
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          settings: |
+            {
+              "model": "claude-opus-4.5"
+            }
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+            PR BRANCH: ${{ github.head_ref }}
+
+            ## タスク: ドキュメント自動更新
+
+            このPRのソースコード変更に基づいて、リポジトリ内のドキュメントを更新してください。
+
+            ### 手順
+            1. `gh pr diff ${{ github.event.pull_request.number }}` でPRの変更内容を確認
+            2. 変更されたソースコードを分析し、ドキュメントへの影響を判断
+            3. docs/ ディレクトリ内の関連するドキュメントを特定して更新
+            4. 必要に応じてREADME.mdも更新
+            5. 変更がある場合のみ、git add → git commit → git push
+
+            ### 更新判断の基準
+            - 関数/メソッドのシグネチャ変更 → APIドキュメント更新
+            - 新機能追加 → 使用例・説明を追加
+            - 設定オプション変更 → 設定ガイド更新
+            - 破壊的変更 → CHANGELOG.mdに記載
+
+            ### 重要
+            - ドキュメントに影響がない変更の場合は、何もせずに終了
+            - コミットメッセージは「docs: [変更内容の要約]」の形式で
+            - 日本語でドキュメントを記述
+
+            Bashツールで以下のコマンドを使用できます：
+            - `gh pr diff` でPRの差分確認
+            - `git add`, `git commit`, `git push` で変更をコミット
+
+          claude_args: '--allowed-tools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git status:*),Bash(cat:*),Bash(ls:*),View,Edit"'
+        env:
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}

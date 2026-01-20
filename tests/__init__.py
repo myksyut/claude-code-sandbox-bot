@@ -1,0 +1,1 @@
+"""AI Coding Project Boilerplateのテストスイート。"""
