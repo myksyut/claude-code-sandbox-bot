@@ -85,15 +85,18 @@ skills:
 
   project-context:
     skill: "project-context"
-    tags: [context, project-specific, implementation]
-    typical-use: "プロジェクト固有情報、実装原則の理解"
+    tags: [context, project-specific, implementation, slack-bot, claude-code, sandbox, github, mcp]
+    typical-use: "Slack Bot経由でClaude Codeサンドボックスを操作、GitHub連携、MCP統合、リトライ設計、Human-in-the-loop"
     size: small
     key-references:
-      - "プロジェクト固有（経験則）"
+      - "Claude Code公式ドキュメント"
+      - "Slack Bolt SDK"
+      - "MCP - Model Context Protocol"
     sections:
-      - "基本設定"
-      - "実装原則"
-      - "カスタマイズガイド"
+      - "プロジェクト概要"
+      - "開発体制"
+      - "ビジネス制約"
+      - "システムの主要機能"
 
   documentation-criteria:
     skill: "documentation-criteria"
