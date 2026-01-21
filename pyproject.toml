@@ -33,6 +33,9 @@ dependencies = [
     "slack-bolt>=1.18.0",
     "slack-sdk>=3.27.0",
     "aiohttp>=3.9.0",
+    "redis>=5.0.0",
+    "azure-mgmt-containerinstance>=10.0.0",
+    "azure-identity>=1.15.0",
 ]
 
 [project.optional-dependencies]

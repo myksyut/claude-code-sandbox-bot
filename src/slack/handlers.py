@@ -7,9 +7,29 @@ app_mentionイベントとスラッシュコマンドのハンドラを提供す
 
 import logging
 import re
+import time
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any, TypedDict
+from typing import Any, Protocol, TypedDict
+
+from src.task.models import Task, TaskStatus
+
+
+class TaskManagerProtocol(Protocol):
+    """TaskManager用のProtocol型。
+
+    タスク管理機能のインターフェースを定義する。
+    具体的な実装は依存性注入で渡される。
+    """
+
+    async def submit_task(self, task: Task) -> None:
+        """タスクを投入する。
+
+        Args:
+            task: 投入するタスク
+        """
+        ...
+
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +70,42 @@ def generate_task_id() -> str:
     return str(uuid.uuid4())
 
 
+def create_task(
+    task_id: str,
+    channel_id: str,
+    thread_ts: str,
+    user_id: str,
+    prompt: str,
+    repository_url: str,
+    idempotency_key: str | None = None,
+) -> Task:
+    """Taskインスタンスを生成する。
+
+    Args:
+        task_id: UUID v4形式のタスクID
+        channel_id: Slackチャンネル識別子
+        thread_ts: Slackスレッドのタイムスタンプ
+        user_id: リクエストを送信したユーザーの識別子
+        prompt: ユーザーが入力したプロンプト
+        repository_url: GitHubリポジトリURL
+        idempotency_key: 冪等性を保証するための一意キー(省略時はtask_idを使用)
+
+    Returns:
+        作成されたTaskインスタンス(status=PENDING)
+    """
+    return Task(
+        id=task_id,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+        user_id=user_id,
+        prompt=prompt,
+        repository_url=repository_url,
+        status=TaskStatus.PENDING,
+        created_at=time.time(),
+        idempotency_key=idempotency_key or task_id,
+    )
+
+
 # 型エイリアス
 SayFunction = Callable[..., Awaitable[dict[str, Any]]]
 AckFunction = Callable[[], Awaitable[None]]
@@ -59,22 +115,26 @@ RespondFunction = Callable[[str], Awaitable[None]]
 async def handle_app_mention(
     event: dict[str, Any],
     say: SayFunction,
+    task_manager: TaskManagerProtocol | None = None,
 ) -> TaskResult | None:
     """app_mentionイベントを処理する。
 
     ボットがメンションされた時に呼び出される。
     GitHub URLが含まれている場合はタスクIDを生成し「起動中...」メッセージを返す。
     URLがない場合はエラーメッセージを返す。
+    TaskManagerが渡された場合はタスクを投入する。
 
     Args:
         event: Slackから受信したイベントデータ
         say: メッセージ送信用の関数
+        task_manager: タスク管理機能(オプショナル、後方互換性のため)
 
     Returns:
         TaskResult: タスク処理結果(task_id, repository_url)。
         エラー時はNone。
     """
     thread_ts = event.get("ts", "")
+    channel_id = event.get("channel", "")
     user_id = event.get("user", "")
     text = event.get("text", "")
 
@@ -111,11 +171,24 @@ async def handle_app_mention(
     )
 
     # 1秒以内に応答するための即時メッセージ
-    # TODO: 後続フェーズでタスク管理との連携を追加
     await say(
         text=f"<@{user_id}> 起動中... (タスクID: {task_id})",
         thread_ts=thread_ts,
     )
+
+    # TaskManagerが渡された場合はタスクを投入
+    if task_manager is not None:
+        # プロンプトはテキストからボットメンションを除いた部分
+        prompt = text.strip()
+        task = create_task(
+            task_id=task_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            user_id=user_id,
+            prompt=prompt,
+            repository_url=repository_url,
+        )
+        await task_manager.submit_task(task)
 
     return TaskResult(task_id=task_id, repository_url=repository_url)
 

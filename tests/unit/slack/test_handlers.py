@@ -317,3 +317,128 @@ class TestSlashCommandHandlerWithValidation:
         uuid_v4_pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
         assert result is not None
         assert re.match(uuid_v4_pattern, result["task_id"]) is not None
+
+
+class TestCreateTask:
+    """create_task関数のテスト。"""
+
+    def test_creates_task_with_required_fields(self) -> None:
+        """必須フィールドでTaskインスタンスを生成することを検証。"""
+        from src.slack.handlers import create_task
+        from src.task.models import TaskStatus
+
+        task = create_task(
+            task_id="a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+            channel_id="C12345",
+            thread_ts="1234567890.000001",
+            user_id="U12345",
+            prompt="リポジトリを調査して",
+            repository_url="https://github.com/owner/repo",
+        )
+
+        assert task.id == "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d"
+        assert task.channel_id == "C12345"
+        assert task.thread_ts == "1234567890.000001"
+        assert task.user_id == "U12345"
+        assert task.prompt == "リポジトリを調査して"
+        assert task.repository_url == "https://github.com/owner/repo"
+        assert task.status == TaskStatus.PENDING
+        assert task.created_at > 0
+        assert task.idempotency_key == "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d"
+
+    def test_creates_task_with_custom_idempotency_key(self) -> None:
+        """カスタムidempotency_keyでTaskインスタンスを生成することを検証。"""
+        from src.slack.handlers import create_task
+
+        task = create_task(
+            task_id="a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+            channel_id="C12345",
+            thread_ts="1234567890.000001",
+            user_id="U12345",
+            prompt="リポジトリを調査して",
+            repository_url="https://github.com/owner/repo",
+            idempotency_key="custom-key-123",
+        )
+
+        assert task.idempotency_key == "custom-key-123"
+
+    def test_task_created_at_is_current_timestamp(self) -> None:
+        """created_atが現在時刻付近のタイムスタンプであることを検証。"""
+        import time
+
+        from src.slack.handlers import create_task
+
+        before = time.time()
+        task = create_task(
+            task_id="a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+            channel_id="C12345",
+            thread_ts="1234567890.000001",
+            user_id="U12345",
+            prompt="リポジトリを調査して",
+            repository_url="https://github.com/owner/repo",
+        )
+        after = time.time()
+
+        assert before <= task.created_at <= after
+
+
+class TestTaskManagerIntegration:
+    """TaskManager連携のテスト。"""
+
+    @pytest.fixture
+    def mock_task_manager(self) -> AsyncMock:
+        """モックされたTaskManagerを返す。"""
+        mock = AsyncMock()
+        mock.submit_task = AsyncMock(return_value=None)
+        return mock
+
+    @pytest.fixture
+    def mock_event_with_url(self) -> dict:
+        """GitHub URLを含むapp_mentionイベントを返す。"""
+        return {
+            "type": "app_mention",
+            "user": "U12345",
+            "text": "<@U_BOT> https://github.com/owner/repo このリポを調査して",
+            "ts": "1234567890.000001",
+            "channel": "C12345",
+        }
+
+    @pytest.fixture
+    def mock_say(self) -> AsyncMock:
+        """モックされたsay関数を返す。"""
+        return AsyncMock(return_value={"ts": "1234567890.123456"})
+
+    @pytest.mark.asyncio
+    async def test_app_mention_submits_task_to_manager(
+        self, mock_event_with_url: dict, mock_say: AsyncMock, mock_task_manager: AsyncMock
+    ) -> None:
+        """TaskManagerが渡された場合にタスクが投入されることを検証。"""
+        from src.slack.handlers import handle_app_mention
+        from src.task.models import Task
+
+        await handle_app_mention(
+            event=mock_event_with_url,
+            say=mock_say,
+            task_manager=mock_task_manager,
+        )
+
+        mock_task_manager.submit_task.assert_called_once()
+        submitted_task = mock_task_manager.submit_task.call_args[0][0]
+        assert isinstance(submitted_task, Task)
+        assert submitted_task.repository_url == "https://github.com/owner/repo"
+
+    @pytest.mark.asyncio
+    async def test_app_mention_works_without_task_manager(
+        self, mock_event_with_url: dict, mock_say: AsyncMock
+    ) -> None:
+        """TaskManagerがない場合でも正常に動作することを検証(後方互換性)。"""
+        from src.slack.handlers import handle_app_mention
+
+        result = await handle_app_mention(
+            event=mock_event_with_url,
+            say=mock_say,
+        )
+
+        assert result is not None
+        assert result["task_id"] is not None
+        mock_say.assert_called_once()
