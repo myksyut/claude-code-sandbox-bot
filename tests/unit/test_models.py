@@ -204,6 +204,46 @@ class TestSandboxConfig:
         )
         assert config.environment == {}
 
+    def test_optional_github_fields_default_to_none(self):
+        """GitHub連携フィールドがデフォルトでNoneであることを確認。"""
+        config = SandboxConfig(
+            image="claude-sandbox:latest",
+            cpu=1.0,
+            memory_gb=1.0,
+            environment={},
+        )
+        assert config.repository_url is None
+        assert config.github_pat is None
+        assert config.prompt is None
+
+    def test_sandbox_config_with_github_fields(self):
+        """GitHub連携フィールドが設定できることを確認。"""
+        config = SandboxConfig(
+            image="claude-sandbox:latest",
+            cpu=1.0,
+            memory_gb=1.0,
+            environment={},
+            repository_url="https://github.com/example/repo",
+            github_pat="ghp_test_pat_12345",
+            prompt="Analyze this codebase",
+        )
+        assert config.repository_url == "https://github.com/example/repo"
+        assert config.github_pat == "ghp_test_pat_12345"
+        assert config.prompt == "Analyze this codebase"
+
+    def test_sandbox_config_with_partial_github_fields(self):
+        """GitHub連携フィールドが部分的に設定できることを確認。"""
+        config = SandboxConfig(
+            image="claude-sandbox:latest",
+            cpu=1.0,
+            memory_gb=1.0,
+            environment={},
+            repository_url="https://github.com/example/repo",
+        )
+        assert config.repository_url == "https://github.com/example/repo"
+        assert config.github_pat is None
+        assert config.prompt is None
+
 
 class TestTaskMessage:
     """TaskMessageモデルのテスト。"""

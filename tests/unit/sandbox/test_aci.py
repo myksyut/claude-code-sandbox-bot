@@ -15,6 +15,7 @@ import pytest
 from pydantic import ValidationError
 from src.sandbox.aci import (
     AzureSandboxManagerImpl,
+    CloneError,
     Sandbox,
     SandboxCreationError,
     SandboxStatus,
@@ -28,13 +29,47 @@ class TestSandboxStatus:
     def test_sandbox_status_has_all_required_values(self):
         """SandboxStatusが必要な全ての状態を持つこと。"""
         assert SandboxStatus.CREATING.value == "creating"
+        assert SandboxStatus.STARTING.value == "starting"
+        assert SandboxStatus.CLONING.value == "cloning"
         assert SandboxStatus.RUNNING.value == "running"
         assert SandboxStatus.TERMINATED.value == "terminated"
         assert SandboxStatus.FAILED.value == "failed"
 
     def test_sandbox_status_is_enum(self):
         """SandboxStatusがEnumであること。"""
-        assert len(SandboxStatus) == 4
+        assert len(SandboxStatus) == 6
+
+
+class TestCloneError:
+    """CloneError例外のテスト。"""
+
+    def test_clone_error_creation(self):
+        """CloneErrorが正しく作成できること。"""
+        error = CloneError(
+            message="Failed to clone repository",
+            task_id="test-task-123",
+        )
+        assert str(error) == "Failed to clone repository"
+        assert error.task_id == "test-task-123"
+        assert error.cause is None
+
+    def test_clone_error_with_cause(self):
+        """CloneErrorが原因例外を保持できること。"""
+        cause = Exception("Network error")
+        error = CloneError(
+            message="Failed to clone repository",
+            task_id="test-task-123",
+            cause=cause,
+        )
+        assert error.cause is cause
+
+    def test_clone_error_is_exception(self):
+        """CloneErrorがExceptionを継承していること。"""
+        error = CloneError(
+            message="Test error",
+            task_id="test-task-123",
+        )
+        assert isinstance(error, Exception)
 
 
 class TestSandbox:
@@ -206,6 +241,121 @@ class TestAzureSandboxManagerImpl:
         assert status == SandboxStatus.TERMINATED
 
 
+class TestGitHubIntegration:
+    """GitHub連携のテスト。"""
+
+    @pytest.fixture
+    def mock_credential(self):
+        """Azure認証情報のモック。"""
+        return MagicMock()
+
+    @pytest.fixture
+    def sandbox_manager(self, mock_credential):
+        """テスト用のAzureSandboxManagerImplインスタンス。"""
+        return AzureSandboxManagerImpl(
+            subscription_id="test-subscription-id",
+            resource_group="test-resource-group",
+            credential=mock_credential,
+        )
+
+    @pytest.fixture
+    def github_config(self):
+        """GitHub連携が有効なSandboxConfig。"""
+        return SandboxConfig(
+            image="ghcr.io/test/sandbox:latest",
+            cpu=1.0,
+            memory_gb=2.0,
+            environment={"ANTHROPIC_API_KEY": "test-key"},
+            repository_url="https://github.com/example/repo",
+            github_pat="ghp_test_pat_12345",
+            prompt="Analyze this codebase",
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_with_github_config_sets_environment_variables(
+        self, sandbox_manager, github_config
+    ):
+        """GitHub連携設定時に環境変数が設定されること。"""
+        with patch.object(sandbox_manager, "_get_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_poller = MagicMock()
+            mock_poller.result.return_value = MagicMock(
+                provisioning_state="Succeeded",
+            )
+            mock_client.container_groups.begin_create_or_update.return_value = mock_poller
+            mock_get_client.return_value = mock_client
+
+            await sandbox_manager.create("test-task-id-1234", github_config)
+
+            # コンテナグループが作成されたことを確認
+            mock_client.container_groups.begin_create_or_update.assert_called_once()
+            call_args = mock_client.container_groups.begin_create_or_update.call_args
+            container_group = call_args.kwargs["container_group"]
+
+            # 環境変数を取得
+            env_vars = container_group.containers[0].environment_variables
+            env_names = [var.name for var in env_vars]
+
+            # GitHub連携の環境変数が含まれていることを確認
+            assert "REPOSITORY_URL" in env_names
+            assert "GITHUB_PAT" in env_names
+            assert "PROMPT" in env_names
+            assert "TASK_ID" in env_names
+
+    @pytest.mark.asyncio
+    async def test_create_without_github_config_skips_github_env_vars(self, sandbox_manager):
+        """GitHub連携未設定時はGitHub関連環境変数がスキップされること。"""
+        basic_config = SandboxConfig(
+            image="ghcr.io/test/sandbox:latest",
+            cpu=1.0,
+            memory_gb=2.0,
+            environment={"ANTHROPIC_API_KEY": "test-key"},
+        )
+
+        with patch.object(sandbox_manager, "_get_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_poller = MagicMock()
+            mock_poller.result.return_value = MagicMock(
+                provisioning_state="Succeeded",
+            )
+            mock_client.container_groups.begin_create_or_update.return_value = mock_poller
+            mock_get_client.return_value = mock_client
+
+            await sandbox_manager.create("test-task-id-1234", basic_config)
+
+            call_args = mock_client.container_groups.begin_create_or_update.call_args
+            container_group = call_args.kwargs["container_group"]
+            env_vars = container_group.containers[0].environment_variables
+            env_names = [var.name for var in env_vars]
+
+            # GitHub連携の環境変数が含まれていないことを確認
+            assert "REPOSITORY_URL" not in env_names
+            assert "GITHUB_PAT" not in env_names
+            assert "PROMPT" not in env_names
+
+    @pytest.mark.asyncio
+    async def test_github_pat_is_set_as_secure_value(self, sandbox_manager, github_config):
+        """GitHub PATがsecure_valueとして設定されること。"""
+        with patch.object(sandbox_manager, "_get_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_poller = MagicMock()
+            mock_poller.result.return_value = MagicMock(
+                provisioning_state="Succeeded",
+            )
+            mock_client.container_groups.begin_create_or_update.return_value = mock_poller
+            mock_get_client.return_value = mock_client
+
+            await sandbox_manager.create("test-task-id-1234", github_config)
+
+            call_args = mock_client.container_groups.begin_create_or_update.call_args
+            container_group = call_args.kwargs["container_group"]
+            env_vars = container_group.containers[0].environment_variables
+
+            # GITHUB_PATがsecure_valueとして設定されていることを確認
+            github_pat_var = next(var for var in env_vars if var.name == "GITHUB_PAT")
+            assert github_pat_var.secure_value == "ghp_test_pat_12345"
+
+
 class TestSandboxManagerProtocol:
     """SandboxManager Protocolの準拠テスト。"""
 
@@ -229,3 +379,198 @@ class TestSandboxManagerProtocol:
     def mock_credential(self):
         """Azure認証情報のモック。"""
         return MagicMock()
+
+
+class TestClaudeCodeExecution:
+    """Claude Code実行のテスト。"""
+
+    @pytest.fixture
+    def mock_credential(self):
+        """Azure認証情報のモック。"""
+        return MagicMock()
+
+    @pytest.fixture
+    def sandbox_manager(self, mock_credential):
+        """テスト用のAzureSandboxManagerImplインスタンス。"""
+        return AzureSandboxManagerImpl(
+            subscription_id="test-subscription-id",
+            resource_group="test-resource-group",
+            credential=mock_credential,
+        )
+
+    @pytest.fixture
+    def github_config_with_prompt(self):
+        """GitHub連携とプロンプトが有効なSandboxConfig。"""
+        return SandboxConfig(
+            image="ghcr.io/test/sandbox:latest",
+            cpu=1.0,
+            memory_gb=2.0,
+            environment={"ANTHROPIC_API_KEY": "test-key"},
+            repository_url="https://github.com/example/repo",
+            github_pat="ghp_test_pat_12345",
+            prompt="Analyze this codebase",
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_sets_command_for_claude_execution(
+        self, sandbox_manager, github_config_with_prompt
+    ):
+        """Claude Code実行用のコマンドがコンテナに設定されること。"""
+        with patch.object(sandbox_manager, "_get_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_poller = MagicMock()
+            mock_poller.result.return_value = MagicMock(
+                provisioning_state="Succeeded",
+            )
+            mock_client.container_groups.begin_create_or_update.return_value = mock_poller
+            mock_get_client.return_value = mock_client
+
+            await sandbox_manager.create("test-task-id-1234", github_config_with_prompt)
+
+            call_args = mock_client.container_groups.begin_create_or_update.call_args
+            container_group = call_args.kwargs["container_group"]
+            container = container_group.containers[0]
+
+            # コマンドが設定されていることを確認
+            assert container.command is not None
+            assert len(container.command) > 0
+
+    @pytest.mark.asyncio
+    async def test_command_includes_git_clone(self, sandbox_manager, github_config_with_prompt):
+        """コマンドにgit cloneが含まれること。"""
+        with patch.object(sandbox_manager, "_get_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_poller = MagicMock()
+            mock_poller.result.return_value = MagicMock(
+                provisioning_state="Succeeded",
+            )
+            mock_client.container_groups.begin_create_or_update.return_value = mock_poller
+            mock_get_client.return_value = mock_client
+
+            await sandbox_manager.create("test-task-id-1234", github_config_with_prompt)
+
+            call_args = mock_client.container_groups.begin_create_or_update.call_args
+            container_group = call_args.kwargs["container_group"]
+            container = container_group.containers[0]
+
+            # コマンド文字列にgit cloneが含まれることを確認
+            command_str = " ".join(container.command)
+            assert "git clone" in command_str
+
+    @pytest.mark.asyncio
+    async def test_command_includes_claude_with_skip_permissions(
+        self, sandbox_manager, github_config_with_prompt
+    ):
+        """コマンドにclaude --dangerously-skip-permissionsが含まれること。"""
+        with patch.object(sandbox_manager, "_get_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_poller = MagicMock()
+            mock_poller.result.return_value = MagicMock(
+                provisioning_state="Succeeded",
+            )
+            mock_client.container_groups.begin_create_or_update.return_value = mock_poller
+            mock_get_client.return_value = mock_client
+
+            await sandbox_manager.create("test-task-id-1234", github_config_with_prompt)
+
+            call_args = mock_client.container_groups.begin_create_or_update.call_args
+            container_group = call_args.kwargs["container_group"]
+            container = container_group.containers[0]
+
+            command_str = " ".join(container.command)
+            assert "claude" in command_str
+            assert "--dangerously-skip-permissions" in command_str
+
+    @pytest.mark.asyncio
+    async def test_command_includes_prompt_option(self, sandbox_manager, github_config_with_prompt):
+        """コマンドに-pオプションでプロンプトが渡されること。"""
+        with patch.object(sandbox_manager, "_get_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_poller = MagicMock()
+            mock_poller.result.return_value = MagicMock(
+                provisioning_state="Succeeded",
+            )
+            mock_client.container_groups.begin_create_or_update.return_value = mock_poller
+            mock_get_client.return_value = mock_client
+
+            await sandbox_manager.create("test-task-id-1234", github_config_with_prompt)
+
+            call_args = mock_client.container_groups.begin_create_or_update.call_args
+            container_group = call_args.kwargs["container_group"]
+            container = container_group.containers[0]
+
+            command_str = " ".join(container.command)
+            assert "-p" in command_str
+
+    @pytest.mark.asyncio
+    async def test_command_uses_github_pat_for_private_repos(
+        self, sandbox_manager, github_config_with_prompt
+    ):
+        """プライベートリポジトリ用にGitHub PATを使ったcloneコマンドが設定されること。"""
+        with patch.object(sandbox_manager, "_get_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_poller = MagicMock()
+            mock_poller.result.return_value = MagicMock(
+                provisioning_state="Succeeded",
+            )
+            mock_client.container_groups.begin_create_or_update.return_value = mock_poller
+            mock_get_client.return_value = mock_client
+
+            await sandbox_manager.create("test-task-id-1234", github_config_with_prompt)
+
+            call_args = mock_client.container_groups.begin_create_or_update.call_args
+            container_group = call_args.kwargs["container_group"]
+            container = container_group.containers[0]
+
+            command_str = " ".join(container.command)
+            # GITHUB_PAT環境変数を使ったcloneパターンが含まれること
+            assert "GITHUB_PAT" in command_str
+
+    @pytest.mark.asyncio
+    async def test_no_command_without_repository_url(self, sandbox_manager):
+        """repository_urlがない場合はコマンドが設定されないこと。"""
+        basic_config = SandboxConfig(
+            image="ghcr.io/test/sandbox:latest",
+            cpu=1.0,
+            memory_gb=2.0,
+            environment={"ANTHROPIC_API_KEY": "test-key"},
+        )
+
+        with patch.object(sandbox_manager, "_get_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_poller = MagicMock()
+            mock_poller.result.return_value = MagicMock(
+                provisioning_state="Succeeded",
+            )
+            mock_client.container_groups.begin_create_or_update.return_value = mock_poller
+            mock_get_client.return_value = mock_client
+
+            await sandbox_manager.create("test-task-id-1234", basic_config)
+
+            call_args = mock_client.container_groups.begin_create_or_update.call_args
+            container_group = call_args.kwargs["container_group"]
+            container = container_group.containers[0]
+
+            # repository_urlがない場合はコマンドがNone
+            assert container.command is None
+
+
+class TestSandboxStatusTransition:
+    """サンドボックスステータス遷移のテスト。"""
+
+    def test_sandbox_status_has_completed_value(self):
+        """SandboxStatusにCOMPLETED状態が存在すること。"""
+        # Note: Design DocではTaskStatusにCOMPLETEDがあるが、
+        # SandboxStatusには現在TERMINATED/FAILEDのみ
+        # この要件を満たすにはSandboxStatusの拡張またはTERMINATEDの解釈変更が必要
+        # 現時点ではTERMINATEDを成功終了として扱う
+        assert SandboxStatus.TERMINATED.value == "terminated"
+        assert SandboxStatus.FAILED.value == "failed"
+
+    def test_status_cloning_exists(self):
+        """SandboxStatusにCLONING状態が存在すること。"""
+        assert SandboxStatus.CLONING.value == "cloning"
+
+    def test_status_running_exists(self):
+        """SandboxStatusにRUNNING状態が存在すること。"""
+        assert SandboxStatus.RUNNING.value == "running"

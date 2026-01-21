@@ -89,6 +89,11 @@ ignore = [
     "ARG",      # Unused arguments in tests
     "PLR2004",  # Magic values in tests
     "PLC0415",  # import should be at the top-level (needed for monkeypatching env vars)
+    "ERA001",   # Commented-out code (test spec comments)
+    "RUF001",   # Ambiguous unicode characters (Japanese text)
+    "RUF002",   # Ambiguous unicode in docstrings (Japanese text)
+    "RUF003",   # Ambiguous unicode in comments (Japanese text)
+    "E501",     # Line too long (spec comments in Japanese)
 ]
 
 [tool.ruff.format]

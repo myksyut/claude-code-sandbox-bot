@@ -38,12 +38,16 @@ class SandboxStatus(Enum):
 
     コンテナのライフサイクルに対応する状態を定義する:
     - CREATING: コンテナ作成中
+    - STARTING: コンテナ起動開始
+    - CLONING: リポジトリクローン中
     - RUNNING: コンテナ実行中
     - TERMINATED: コンテナ終了済み
     - FAILED: コンテナ起動/実行失敗
     """
 
     CREATING = "creating"
+    STARTING = "starting"
+    CLONING = "cloning"
     RUNNING = "running"
     TERMINATED = "terminated"
     FAILED = "failed"
@@ -71,6 +75,23 @@ class SandboxCreationError(Exception):
     """サンドボックス作成エラー。
 
     ACIコンテナの起動に失敗した場合にraiseされる。
+
+    Attributes:
+        message: エラーメッセージ
+        task_id: 対象タスクのID
+        cause: 原因となった例外
+    """
+
+    def __init__(self, message: str, task_id: str, cause: Exception | None = None):
+        super().__init__(message)
+        self.task_id = task_id
+        self.cause = cause
+
+
+class CloneError(Exception):
+    """リポジトリクローンエラー。
+
+    GitHubリポジトリのクローンに失敗した場合にraiseされる。
 
     Attributes:
         message: エラーメッセージ
@@ -178,14 +199,54 @@ class AzureSandboxManagerImpl:
         """
         return f"sandbox-{task_id[:8]}"
 
+    def _build_execution_command(self, config: SandboxConfig) -> list[str] | None:
+        """サンドボックス実行コマンドを構築する。
+
+        リポジトリURLが設定されている場合、以下の処理を行うコマンドを生成:
+        1. GitHub PATがあればPAT認証でgit clone、なければ公開リポジトリとしてclone
+        2. クローンしたディレクトリに移動
+        3. Claude Code CLIを --dangerously-skip-permissions オプションで起動
+        4. プロンプトを -p オプションで渡す
+
+        Args:
+            config: サンドボックス設定
+
+        Returns:
+            コマンドのリスト (repository_urlがない場合はNone)
+        """
+        if config.repository_url is None:
+            return None
+
+        # シェルスクリプトを構築
+        script = """
+set -e
+
+# Clone repository
+if [ -n "$GITHUB_PAT" ]; then
+    # Extract owner/repo from URL
+    REPO_PATH=$(echo "$REPOSITORY_URL" | sed 's|https://github.com/||')
+    git clone "https://${GITHUB_PAT}@github.com/${REPO_PATH}" /workspace/repo
+else
+    git clone "$REPOSITORY_URL" /workspace/repo
+fi
+
+cd /workspace/repo
+
+# Execute Claude Code
+claude --dangerously-skip-permissions -p "$PROMPT" 2>&1
+"""
+
+        return ["/bin/bash", "-c", script.strip()]
+
     async def _create_container_group(
-        self, container_group_name: str, config: SandboxConfig
+        self, container_group_name: str, config: SandboxConfig, task_id: str
     ) -> ContainerGroup:
         """ACIコンテナグループを作成する。
 
         Args:
             container_group_name: コンテナグループ名
             config: サンドボックス設定
+            task_id: タスクID
 
         Returns:
             作成されたContainerGroup
@@ -198,6 +259,24 @@ class AzureSandboxManagerImpl:
             for key, value in config.environment.items()
         ]
 
+        # GitHub連携の環境変数を追加
+        if config.repository_url is not None:
+            environment_variables.append(
+                EnvironmentVariable(name="REPOSITORY_URL", value=config.repository_url)
+            )
+        if config.github_pat is not None:
+            environment_variables.append(
+                EnvironmentVariable(name="GITHUB_PAT", secure_value=config.github_pat)
+            )
+        if config.prompt is not None:
+            environment_variables.append(EnvironmentVariable(name="PROMPT", value=config.prompt))
+        # GitHub連携時にはTASK_IDも設定する
+        if config.repository_url is not None or config.github_pat is not None:
+            environment_variables.append(EnvironmentVariable(name="TASK_ID", value=task_id))
+
+        # 実行コマンドを構築
+        command = self._build_execution_command(config)
+
         # コンテナ定義
         container = Container(
             name=container_group_name,
@@ -209,6 +288,7 @@ class AzureSandboxManagerImpl:
                 )
             ),
             environment_variables=environment_variables,
+            command=command,
         )
 
         # コンテナグループ定義
@@ -295,7 +375,7 @@ class AzureSandboxManagerImpl:
         )
 
         try:
-            result = await self._create_container_group(container_group_name, config)
+            result = await self._create_container_group(container_group_name, config, task_id)
 
             # ステータスを判定
             status = SandboxStatus.RUNNING

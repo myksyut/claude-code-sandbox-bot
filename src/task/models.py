@@ -78,12 +78,18 @@ class SandboxConfig(BaseModel):
         cpu: 割り当てるCPUコア数(0より大きい値)
         memory_gb: 割り当てるメモリ量(GB単位、0より大きい値)
         environment: 環境変数の辞書
+        repository_url: GitHubリポジトリURL(オプション)
+        github_pat: GitHub Personal Access Token(オプション)
+        prompt: ユーザープロンプト(オプション)
     """
 
     image: str
     cpu: float = Field(..., gt=0)
     memory_gb: float = Field(..., gt=0)
     environment: dict[str, str]
+    repository_url: str | None = None
+    github_pat: str | None = None
+    prompt: str | None = None
 
 
 class TaskMessage(BaseModel):
